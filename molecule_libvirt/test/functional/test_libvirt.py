@@ -35,20 +35,16 @@ LOG = logger.get_logger(__name__)
 @pytest.mark.xfail(reason="need to fix template path")
 def test_command_init_scenario(temp_dir):
     role_directory = os.path.join(temp_dir.strpath, "test-init")
-    options = {"role_name": "test-init"}
-    cmd = sh.molecule.bake("init", "role", **options)
+    cmd = sh.molecule.bake("init", "role", "test-role", {"driver-name": "libvirt"})
     run_command(cmd)
     metadata_lint_update(role_directory)
 
     with change_dir_to(role_directory):
         molecule_directory = pytest.helpers.molecule_directory()
         scenario_directory = os.path.join(molecule_directory, "test-scenario")
-        options = {
-            "scenario_name": "test-scenario",
-            "role_name": "test-init",
-            "driver-name": "libvirt",
-        }
-        cmd = sh.molecule.bake("init", "scenario", **options)
+
+        options = {"role_name": "test-init"}
+        cmd = sh.molecule.bake("init", "scenario", "test-scenario", **options)
         run_command(cmd)
 
         assert os.path.isdir(scenario_directory)
