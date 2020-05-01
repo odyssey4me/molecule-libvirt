@@ -1,0 +1,52 @@
+---
+- name: Destroy
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    platform_name_list: "{{ molecule_yml.platforms | map(attribute='name') | sort | unique | list }}"
+    platform_volume_list: "{{ platform_name_list | map('regex_replace', '^(.*)$', '\\1.qcow2' ) | list }}"
+    domains_to_stop: "{{ _all_running_vms.list_vms | intersect(platform_name_list) }}"
+    domains_to_delete: "{{ _all_existing_vms.list_vms | intersect(platform_name_list) }}"
+    volumes_to_delete: "{{ _all_volumes.stdout_lines | intersect(platform_volume_list) }}"
+  tasks:
+    - name: Get the list of existing VM's
+      virt:
+        command: list_vms
+        uri: "{{ virt_uri }}"
+      register: _all_existing_vms
+
+    - name: Get the list of running VM's
+      virt:
+        command: list_vms
+        state: running
+        uri: "{{ virt_uri }}"
+      register: _all_running_vms
+
+    - name: Get the list of VM volumes
+      shell: |-
+        virsh --connect={{ virt_uri }} vol-list --pool {{ image_pool_name }} | awk '$1 !~ /^Name|^-|^$/ {print $1}'
+      register: _all_volumes
+      changed_when: false
+
+    - name: Force VM to turn off
+      virt:
+        name: "{{ item }}"
+        command: destroy
+        uri: "{{ virt_uri }}"
+      loop: "{{ domains_to_stop }}"
+
+    - name: Undefine the VM
+      virt:
+        name: "{{ item }}"
+        command: undefine
+        uri: "{{ virt_uri }}"
+      loop: "{{ domains_to_delete }}"
+
+    - name: Delete the VM volumes
+      command: >-
+        virsh
+        --connect={{ virt_uri }}
+        vol-delete {{ item }}
+        --pool {{ image_pool_name }}
+      loop: "{{ volumes_to_delete }}"

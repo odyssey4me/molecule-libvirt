@@ -1,0 +1,167 @@
+---
+- name: Create
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    requested_image_list: "{{ molecule_yml.platforms | map(attribute='image') | sort | unique | list }}"
+    valid_image_data: "{{ (_valid_image_list.stdout | from_json)['templates'] }}"
+    valid_image_list: "{{ valid_image_data | map(attribute='os-version') | list }}"
+  tasks:
+    - name: Get list of valid image names
+      command: >-
+        virt-builder --list --list-format json
+      register: _valid_image_list
+      changed_when: false
+
+    - name: Validate that required parameters are provided
+      assert:
+        that:
+          - item.name is defined
+          - item.memory_mb is defined
+          - item.disk_gb is defined
+          - item.vcpus is defined
+        fail_msg: "All require parameters are not provided for {{ item.name }}."
+        success_msg: "All required parameters are provided."
+      loop: "{{ molecule_yml.platforms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Validate that all requested images are valid
+      assert:
+        that:
+          - requested_image_list is subset(valid_image_list)
+        fail_msg: "The following images are invalid: {{ requested_image_list | difference(valid_image_list) }}"
+        success_msg: "All requested images are valid."
+
+    - name: Ensure required folders exist
+      file:
+        path: "{{ item }}"
+        state: directory
+      loop:
+        - "{{ image_pool_folder }}"
+        - "{{ config_folder }}"
+
+    - name: Create volume pool
+      virt_pool:
+        name: "{{ image_pool_name }}"
+        command: define
+        xml: "{{ lookup('template', 'templates/volume_pool.xml.j2') }}"
+        uri: "{{ virt_uri }}"
+
+    - name: List existing pools
+      virt_pool:
+        command: list_pools
+        uri: "{{ virt_uri }}"
+      register: _existing_pools
+
+    - name: Build volume pool
+      virt_pool:
+        name: "{{ image_pool_name }}"
+        command: build
+        uri: "{{ virt_uri }}"
+      when:
+        - image_pool_name not in _existing_pools['list_pools']
+
+    - name: Start volume pool
+      virt_pool:
+        name: "{{ image_pool_name }}"
+        command: start
+        state: active
+        uri: "{{ virt_uri }}"
+
+    - name: Enable autostart for volume pool
+      virt_pool:
+        name: "{{ image_pool_name }}"
+        autostart: yes
+        uri: "{{ virt_uri }}"
+
+    - name: Create the VM root disk
+      shell: >-
+        virt-builder
+        {{ item.image }}
+        --size {{ item.disk_gb }}G
+        --output {{ image_pool_folder }}/{{ item.name }}.qcow2
+        --memsize {{ item.memory_mb }}
+        --ssh-inject root:file:{{ ansible_user_dir }}/.ssh/id_rsa.pub
+        --selinux-relabel
+        --quiet
+      environment:
+        LIBGUESTFS_BACKEND: direct
+      register: _create_vm_disks
+      args:
+        creates: "{{ image_pool_folder }}/{{ item.name }}.qcow2"
+      loop: "{{ molecule_yml.platforms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Show the VM disk creation output
+      debug:
+        var: item.stdout
+      loop: "{{ _create_vm_disks.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+
+    - name: Create the VM
+      vars:
+        image_data_os_variant: "{{ (valid_image_data | selectattr('os-version', 'equalto', item.image) | list | first).get('osinfo') }}"
+        image_name_os_variant: "{{ item.image | regex_replace('-', '') }}"
+      shell: >-
+        virt-install
+        --connect={{ virt_uri }}
+        --name {{ item.name }}
+        --memory {{ item.memory_mb }}
+        --vcpus {{ item.vcpus }}
+        --disk {{ image_pool_folder }}/{{ item.name }}.qcow2,bus=virtio
+        --network bridge=virbr0,model=virtio
+        --graphics none
+        --virt-type kvm
+        --hvm
+        --console pty,target_type=serial
+        --noautoconsole
+        --boot hd
+        --os-type linux
+        --os-variant {{ image_data_os_variant | default(image_name_os_variant, true) }}
+      args:
+        creates: "{{ config_folder }}/{{ item.name }}.xml"
+      loop: "{{ molecule_yml.platforms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Wait until the VM has an address
+      shell: |-
+        virsh_addr_raw=$(virsh domifaddr --domain {{ item.name }} --source arp | awk '$1 !~ /^Name|^-|^$/ {print $4}')
+        echo ${virsh_addr_raw%/*}
+      args:
+        executable: /bin/bash
+      register: _wait_start
+      delay: 30
+      retries: 10
+      until:
+        - _wait_start.stdout is defined
+        - _wait_start.stdout != ''
+      loop: "{{ molecule_yml.platforms }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Populate instance config list
+      set_fact:
+        instance_config_list: "{{ _wait_start.results | json_query('[*].{instance: item.name, address: stdout_lines[0]}') }}"
+
+    - debug:
+        var: instance_config_list
+
+    - name: Wait until the VM SSH service is up
+      wait_for:
+        port: 22
+        host: "{{ item.address }}"
+        search_regex: OpenSSH
+        delay: 10
+      loop: "{{ instance_config_list }}"
+      loop_control:
+        label: "{{ item.instance }}"
+
+    - name: Dump instance config
+      copy:
+        content: "{{ instance_config_list | to_json | from_json | molecule_to_yaml | molecule_header }}"
+        dest: "{{ molecule_instance_config }}"

@@ -37,6 +37,11 @@ class LibVirt(Driver):
           name: libvirt
         platforms:
           - name: instance
+            hostname: instance
+            image: fedora-31
+            memory_mb: 1024
+            disk_gb: 10
+            vcpus: 2
 
     .. code-block:: bash
 
@@ -111,10 +116,10 @@ class LibVirt(Driver):
             d = self._get_instance_config(instance_name)
 
             return {
-                "ansible_user": d["user"],
+                "ansible_user": d.get("user", "root"),
                 "ansible_host": d["address"],
-                "ansible_port": d["port"],
-                "ansible_private_key_file": d["identity_file"],
+                "ansible_port": d.get("port", 22),
+                "ansible_private_key_file": d.get("identity_file", "~/.ssh/id_rsa"),
                 "connection": "ssh",
                 "ansible_ssh_common_args": " ".join(self.ssh_connection_options),
             }

@@ -1,0 +1,11 @@
+---
+driver:
+  name: libvirt
+platforms:
+  - name: instance
+    image: fedora-31
+    memory_mb: 512
+    disk_gb: 10
+    vcpus: 2
+provisioner:
+  name: ansible
